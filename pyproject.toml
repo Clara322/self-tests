@@ -8,13 +8,14 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "dataclasses>=0.8",
     "gymnasium>=1.3.0",
     "matplotlib>=3.11.2",
     "numpy>=2.5.3",
 ]
 
 [project.scripts]
-self-tests = "self_tests:main"
+self-tests = "self_tests.main:main"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
