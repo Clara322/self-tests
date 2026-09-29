@@ -63,7 +63,6 @@ def competence(q_cmd, cfg: ArmConfig, target, rng_eval, n=20):
     return success(tip, hit, target).mean()
 
 def pose_reaching(target, d, sign=1.0):
-    """Joint angles reaching `target` with elbow-to-tip distance d."""
     target = np.asarray(target, float)
     R = np.linalg.norm(target)
     a = (L[0] ** 2 - d ** 2 + R ** 2) / (2 * R)
