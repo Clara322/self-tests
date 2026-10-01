@@ -12,8 +12,8 @@ SPREAD = 0.10                         # default start spread for every type exce
 SLOW_SPREAD = 0.03
 PLATEAU_BAND = (0.25, 0.45)           # where the partial-pair goals must stall
 OBSTACLE_RADIUS = (0.20, 0.35)        # shared by blocked and local_optimum
-HELDOUT_LIMIT = (-1.30, -0.90)        # joint-2 interval
-HELDOUT_JOINT = 2                     # noise on joint 3
+HELDOUT_LIMIT = (-1.30, -0.90)        # joint-2 interval reserved for step 21
+HELDOUT_JOINT = 2                     # noise on joint 3 reserved for step 21
 
 TAG = "v3"                            # version tag in the output file names
 LIMIT_MARGIN = 0.05                   # limit_blocked: gap (rad) between the allowed range
@@ -110,7 +110,7 @@ def sample_goal(rng, gtype, spread=SPREAD):
         d = rng.uniform(*lever_range(t))
         qa, qb = arm.pose_reaching(t, d, 1.0), arm.pose_reaching(t, d, -1.0)
         lo, hi = sorted([qb[1] - rng.uniform(0.2, 0.6), qb[1] + rng.uniform(0.2, 0.6)])
-        if lo <= qa[1] <= hi:                       
+        if lo <= qa[1] <= hi:
             return None
         return t, ArmConfig(limits=_lim(lo, hi)), qa, s0
 
@@ -118,16 +118,16 @@ def sample_goal(rng, gtype, spread=SPREAD):
         t = _reachable_target(rng, 1.0, 1.8)
         d = rng.uniform(*lever_range(t))
         qa, qb = arm.pose_reaching(t, d, 1.0), arm.pose_reaching(t, d, -1.0)
-        side = _elbow(rng)                                  
-        near = qb[1] + side * rng.uniform(0.2, 0.6)          
+        side = _elbow(rng)                                   
+        near = qb[1] + side * rng.uniform(0.2, 0.6)         
         far = near + side * rng.uniform(0.4, 1.2)
         lo, hi = sorted([near, far])
         q2 = _reaching_q2(t)
-        q2 = np.concatenate([q2 - 2 * np.pi, q2, q2 + 2 * np.pi])   
+        q2 = np.concatenate([q2 - 2 * np.pi, q2, q2 + 2 * np.pi])  
         if np.any((q2 > lo - LIMIT_MARGIN) & (q2 < hi + LIMIT_MARGIN)):
-            return None                                     
+            return None                                      
         if lo >= HELDOUT_LIMIT[0] and hi <= HELDOUT_LIMIT[1]:
-            return None                                     
+            return None                                      
         return t, ArmConfig(limits=_lim(lo, hi)), qa, s0
 
     if gtype == "blocked":
@@ -141,15 +141,15 @@ def sample_goal(rng, gtype, spread=SPREAD):
         d, sign = rng.uniform(*lever_range(t)), _elbow(rng)
         qa, qb = arm.pose_reaching(t, d, sign), arm.pose_reaching(t, d, -sign)
         pts = arm.joint_positions(qa)
-        link = rng.integers(1, 3)                          
+        link = rng.integers(1, 3)                           
         c = pts[link] + rng.uniform(0.3, 0.7) * (pts[link + 1] - pts[link])
         rho = rng.uniform(*OBSTACLE_RADIUS)
         obs = (float(c[0]), float(c[1]), float(rho))
-        if not arm.collides(pts, obs):                      
+        if not arm.collides(pts, obs):                       
             return None
-        if arm.collides(arm.joint_positions(qb), obs):      
+        if arm.collides(arm.joint_positions(qb), obs):        
             return None
-        if np.linalg.norm(t - c) < rho + 0.05:             
+        if np.linalg.norm(t - c) < rho + 0.05:                
             return None
         return t, ArmConfig(obstacle=obs), qa, s0
 
@@ -196,10 +196,6 @@ def _practise(cfg, t, rng, mean, std, rounds=HORIZON, batch=16, n_elite=4):
         successes.append(int(arm.success(tip, hit, t).sum()))
     return means, np.array(best), np.array(successes)
 
-# --- gate 1: does the goal show the symptom its label claims? -----------------
-# plateau: competence of the mean at CHECKPOINT and at HORIZON
-# headroom: ceiling minus plateau -- what is still winnable
-# stuck: not one successful attempt in any round up to HORIZON
 RULES = {
     "slow":          dict(plateau=(0.00, 0.00), headroom=(0.50, 1.00), progressing=True),
     "unreachable":   dict(plateau=(0.00, 0.00), headroom=(0.00, 0.02), stuck=True),
@@ -217,7 +213,6 @@ def _competence(q, cfg, t):
 
 
 def _symptom_once(gtype, goal, seed):
-    """Returns (ok, plateau at CHECKPOINT, stall distance)."""
     target, cfg, m0, s0 = goal
     rule = RULES[gtype]
     lo, hi = rule["plateau"]
@@ -229,7 +224,7 @@ def _symptom_once(gtype, goal, seed):
     stall = float(best[CHECKPOINT - 3:CHECKPOINT].mean())
     if not inside(p_ck):
         return False, p_ck, stall
-    if slow:       
+    if slow:        
         return best[-1] < best[len(best) // 2], p_ck, stall
     if rule.get("stuck") and succ.sum() > 0:
         return False, p_ck, stall
@@ -258,7 +253,6 @@ def validate(gtype, goal, seed=0, n_seeds=1):
     return h_lo <= ceil - plateau <= h_hi, plateau, ceil, stall
 
 
-# --- gate 2: does the goal stall for the reason its label claims? -------------
 MECHANISM = {"slow": None, "unreachable": None,
              "blocked": "obstacle", "local_optimum": "obstacle",
              "joint_limit": "limits", "limit_blocked": "limits", "fixable": "noise", "unfixable": "noise"}
@@ -294,16 +288,15 @@ def folding_gain(cfg, target, m0, s0, seed=0):
     return best - before
 
 
-FOLD = {"fixable": (0.15, 1.00), "unfixable": (0.00, 0.08)} 
+FOLD = {"fixable": (0.15, 1.00), "unfixable": (0.00, 0.08)}  
 
 def verify_cause(gtype, goal, seed=0, need=0.5):
-    """Removing the named mechanism must make the goal easy; nothing else may be present."""
     target, cfg, m0, s0 = goal
     mech = MECHANISM[gtype]
     present = mechanisms_present(cfg)
     assert present == ({mech} if mech else set()), \
         f"{gtype} declares {mech} but carries {present or 'nothing'}"
-    if gtype in FOLD:                     
+    if gtype in FOLD:
         lo, hi = FOLD[gtype]
         g = folding_gain(cfg, target, m0, s0, seed)
         return lo <= g <= hi, g
@@ -314,8 +307,7 @@ def verify_cause(gtype, goal, seed=0, need=0.5):
     return _competence(mean, free, target) >= need, float("nan")
 
 
-# --- gate 3: keep the sampled goals spread out ---------------------------------
-MIN_SEPARATION = 0.5        
+MIN_SEPARATION = 0.5
 SCALE = np.array([0.5, 0.05, 0.05, 0.05, 0.5, 1.0, 0.1,
                   1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 
@@ -395,7 +387,7 @@ def _sample_type(gtype, n, rng, spread, n_seeds, max_tries, quota=None):
     done = lambda: all(len(f) >= q for f, q in zip(filled, quota)) if quota else len(filled[0]) >= n
     while not done() and tries < n * max_tries:
         tries += 1
-        if tries % (5 * n) == 0:              
+        if tries % (5 * n) == 0:               
             sep *= 0.5
         g = sample_goal(rng, gtype, spread)
         if g is None:
@@ -425,11 +417,11 @@ def _sample_type(gtype, n, rng, spread, n_seeds, max_tries, quota=None):
     return filled, dict(tries=tries, rejected=rejected, sep=sep)
 
 
-def sample_goals(n_per_type, seed=0, spread=SPREAD, n_seeds=1, max_tries=250):
+def sample_goals(n_per_type, seed=0, spread=SPREAD, n_seeds=1, max_tries=250, natural=False):
     rng = np.random.default_rng(seed)
     pilot_rng = np.random.default_rng(seed + 1)     
     quotas = {}
-    for types, _, edges in PAIRS.values():
+    for types, _, edges in ([] if natural else PAIRS.values()):
         q = _pair_quotas(types, edges, n_per_type, spread, pilot_rng)
         quotas.update({t: q for t in types})
 
@@ -473,12 +465,12 @@ def _goal_to_dict(gtype, goal, plateau, ceil, index):
         "type": gtype,
         "target": np.asarray(target).tolist(),
         "noise_std": np.asarray(cfg.noise_std).tolist(),
-        "limits": limits,                      
+        "limits": limits,                   
         "obstacle": [float(x) for x in cfg.obstacle] if cfg.obstacle is not None else None,
         "penalty": float(cfg.penalty),
         "init_mean": np.asarray(m0).tolist(),
         "init_std": np.asarray(s0).tolist(),
-        "plateau": float(plateau),             
+        "plateau": float(plateau),            
         "ceiling": float(ceil),
     }
 
@@ -593,12 +585,15 @@ if __name__ == "__main__":
     ap.add_argument("--seeds", type=int, default=1, help="practice runs the symptom must survive")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag", default=TAG, help="version tag in the file names")
+    ap.add_argument("--natural", action="store_true",
+                    help="no matching within pairs: typical stalls, not look-alike ones")
     a = ap.parse_args()
 
     for spread in a.spreads:
         goals_path, splits_path = files_for(spread, a.tag)
-        print(f"\n=== spread {spread:.2f}  ({a.n} per type, symptom checked on {a.seeds} run(s)) ===")
-        goals, stats = sample_goals(a.n, seed=a.seed, spread=spread, n_seeds=a.seeds)
+        print(f"\n=== spread {spread:.2f}  ({a.n} per type, symptom checked on {a.seeds} run(s)"
+              f"{', NATURAL: no matching' if a.natural else ''}) ===")
+        goals, stats = sample_goals(a.n, seed=a.seed, spread=spread, n_seeds=a.seeds, natural=a.natural)
         _report(stats)
         save_goals(goals_path, goals, seed=a.seed, n_per_type=a.n, spread=spread,
                    n_seeds=a.seeds, stats=stats)

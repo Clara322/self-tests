@@ -20,38 +20,15 @@ REPEATS = 10
 HOLDOUT = 0.25
 
 
-# Learner run up to CHECKPOINT
-def practise(cfg, target, mean, std, rng, rounds=CHECKPOINT):
-    history = []
-    for _ in range(rounds):
-        cand = mean + std * rng.standard_normal((F.BATCH, 3))
-        tip, hit = arm.execute(cand, cfg, rng)
-        cost = arm.cost(tip, hit, target, cfg)
-        elite = cand[cost.argsort()[:F.N_ELITE]]
-        mean, std = elite.mean(0), np.maximum(elite.std(0), 0.01)
-        dist = np.linalg.norm(tip - target, axis=-1)
-        history.append({
-            "success_rate": float(arm.success(tip, hit, target).mean()),
-            "hit_rate": float(hit.mean()),
-            "best_dist": float(dist.min()),
-            "mean_dist": float(dist.mean()),
-            "best_cost": float(cost.min()),
-            "tip_scatter": float(np.linalg.norm(tip - tip.mean(0), axis=-1).mean()),
-            "std": std.copy(),
-        })
-    return history, mean
+DIRECTION = ["align_j1_recent", "align_j2_recent", "align_j3_recent", "aniso_recent"]
 
 
-def swing_directions(q):
-    pts = arm.joint_positions(q)
-    tip = pts[-1]
-    dirs = []
-    for j in range(3):
-        v = tip - pts[j]
-        perp = np.array([-v[1], v[0]])
-        n = np.linalg.norm(perp)
-        dirs.append(perp / n if n > 1e-9 else np.zeros(2))
-    return dirs
+def geometry(target):
+    R = float(np.linalg.norm(target))
+    aim = target if R < G.REACH else target * (0.999 * G.REACH / R)
+    lo, hi = G.lever_range(aim)
+    return {"geo_dist": R, "geo_reachable": float(R < G.REACH),
+            "geo_lever_lo": lo, "geo_lever_hi": hi}
 
 
 def repeat_probe(cfg, target, mean, rng, n):
@@ -66,7 +43,7 @@ def repeat_probe(cfg, target, mean, rng, n):
         return out
     w, v = np.linalg.eigh(np.cov(dev.T))
     axis = v[:, -1]                       
-    for j, d in enumerate(swing_directions(mean)):
+    for j, d in enumerate(F.swing_directions(mean)):
         out[f"rep_align_j{j + 1}"] = float(abs(axis @ d))
     out["rep_anisotropy"] = float(1 - w[0] / max(w[-1], 1e-12))
     return out
@@ -113,10 +90,12 @@ def build(goals_path, splits_path, n, seed=0):
     rows = []
     for i, (gtype, (target, cfg, m0, s0), d) in enumerate(records):
         rng = np.random.default_rng(seed + 7919 * i)
-        history, mean = practise(cfg, target, m0, s0, rng)
+        history = F.practise(cfg, target, m0, s0, rng, rounds=CHECKPOINT)
+        mean = history[-1]["mean"]
         row = {"goal_id": d["id"], "type": gtype, "split": where[d["id"]]}
         row.update({f"h1_{k}": v for k, v in F.features_at(history, 1).items() if k != "round"})
         row.update({f"h10_{k}": v for k, v in F.features_at(history, CHECKPOINT).items() if k != "round"})
+        row.update(geometry(target))
         prng = np.random.default_rng(10**7 + i)
         row.update(repeat_probe(cfg, target, mean, prng, n))
         best_so_far = min(h["best_dist"] for h in history)
@@ -146,12 +125,17 @@ def evaluate_test(df, sets):
 
 
 def feature_sets(df):
-    h1 = [c for c in df.columns if c.startswith("h1_")]
-    h10 = [c for c in df.columns if c.startswith("h10_")]
+    direction = {f"h1_{c}" for c in DIRECTION} | {f"h10_{c}" for c in DIRECTION}
+    h1 = [c for c in df.columns if c.startswith("h1_") and c not in direction]
+    h10 = [c for c in df.columns if c.startswith("h10_") and c not in direction]
+    h10_dir = [f"h10_{c}" for c in DIRECTION]
+    geo = [c for c in df.columns if c.startswith("geo_")]
     rep = [c for c in df.columns if c.startswith("rep_")]
     look = [c for c in df.columns if c.startswith("look_")]
     post = [c for c in df.columns if c.startswith("post_")]
-    return {"history r1": h1, "history r10": h10, "repeat": rep, "broad": look, "posture": post}
+    return {"hist r1": h1, "hist r10": h10,
+            "r10+dir": h10 + h10_dir, "r10+geo": h10 + geo, "r10+dir+geo": h10 + h10_dir + geo,
+            "repeat": rep, "broad": look, "posture": post}
 
 
 def evaluate(df):
@@ -202,7 +186,8 @@ if __name__ == "__main__":
     for pair in PAIRS:
         r = res[res["pair"] == pair].set_index("features")
         print(f"{pair:38s}" + "".join(f"{r.loc[n, 'accuracy']:13.2f}" for n in names))
-    print("\ncolumns: history after 1 and 10 rounds | each probe alone (same number of attempts)")
+    print("\ncolumns: history after 1 and 10 rounds (as before) | r10 plus scatter direction, plus geometry"
+          " (what the posture probe knows), plus both | each probe alone (16 attempts)")
 
     show = ["rep_scatter", "rep_align_j1", "rep_align_j2", "look_best_clear",
             "post_best_clear", "post_success", "post_success_folded"]

@@ -11,11 +11,34 @@ N_ELITE = 4
 RECENT = 3
 
 
+def swing_directions(q):
+    pts = arm.joint_positions(q)
+    tip = pts[-1]
+    dirs = []
+    for j in range(3):
+        v = tip - pts[j]
+        perp = np.array([-v[1], v[0]])
+        n = np.linalg.norm(perp)
+        dirs.append(perp / n if n > 1e-9 else np.zeros(2))
+    return dirs
+
+
+def scatter_direction(tips, q):
+    dev = tips - tips.mean(0)
+    if np.linalg.norm(dev, axis=-1).mean() < 1e-9:
+        return np.zeros(3), 0.0
+    w, v = np.linalg.eigh(np.cov(dev.T))
+    axis = v[:, -1]
+    align = np.array([abs(axis @ d) for d in swing_directions(q)])
+    return align, float(1 - w[0] / max(w[-1], 1e-12))
+
+
 def practise(cfg, target, mean, std, rng, rounds=max(CHECKPOINTS)):
     history = []
     for _ in range(rounds):
         cand = mean + std * rng.standard_normal((BATCH, 3))
         tip, hit = arm.execute(cand, cfg, rng)
+        align, aniso = scatter_direction(tip, mean)
         cost = arm.cost(tip, hit, target, cfg)
         elite = cand[cost.argsort()[:N_ELITE]]
         mean, std = elite.mean(0), np.maximum(elite.std(0), 0.01)
@@ -28,6 +51,9 @@ def practise(cfg, target, mean, std, rng, rounds=max(CHECKPOINTS)):
             "best_cost": float(cost.min()),
             "tip_scatter": float(np.linalg.norm(tip - tip.mean(0), axis=-1).mean()),
             "std": std.copy(),
+            "align": align,
+            "aniso": aniso,
+            "mean": mean.copy(),
         })
     return history
 
@@ -61,12 +87,18 @@ def features_at(history, k):
         "spread_drop": float(first["std"].mean() - last["std"].mean()),
         # How inconsistent are the outcomes
         "tip_scatter_recent": take("tip_scatter", recent),
+        # Which way do the outcomes scatter, compared with each joint's swing
+        "align_j1_recent": float(np.mean([r["align"][0] for r in recent])),
+        "align_j2_recent": float(np.mean([r["align"][1] for r in recent])),
+        "align_j3_recent": float(np.mean([r["align"][2] for r in recent])),
+        "aniso_recent": take("aniso", recent),
     }
 
 
 FEATURE_NAMES = [k for k in features_at([{
     "success_rate": 0., "hit_rate": 0., "best_dist": 0., "mean_dist": 0.,
-    "best_cost": 0., "tip_scatter": 0., "std": np.zeros(3)}] * max(CHECKPOINTS),
+    "best_cost": 0., "tip_scatter": 0., "std": np.zeros(3),
+    "align": np.zeros(3), "aniso": 0., "mean": np.zeros(3)}] * max(CHECKPOINTS),
     max(CHECKPOINTS))]
 
 
