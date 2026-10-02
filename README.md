@@ -54,13 +54,13 @@ There are two random forest classifiers returning a recovery methodology, one fr
 ### Findings
 The selective self-test beats both never (history-only) and always testing. It achieved 83–86% of the best possible improvement, against 69–81% for choosing from history alone and 80–81% for always testing. 
 
-![Recovery performance across strategies](images\h2_main.png)
+![Recovery performance across strategies](src/self_tests/images/h2_main.png)
 
 Selective testing was most effective when the fix was an arm configuration the learner had never tried: at an obstacle with a way round, it raised the net gain from 69 to 91 (best possible being 95). One explanation consistent with the results below is that self-tests are particularly useful when history cannot differentiate between pairs of similar looking stalls - both on the case when there is another way around an obstacle and a new way of handling a joint limit it significantly improved gain. 
 
 Unsurprisingly, testing did not improve results when no fix existed. 
 
-![Recovery performance by stall cause](images\r3_gain_history_vs_selective.png)
+![Recovery performance by stall cause](src/self_tests/images/r3_gain_history_vs_selective.png)
 
 ### Limitations
 We are not modelling movement along a path, just final positions, this was done to avoid simulating forces, contact dynamics and other physics-based interactions. Also, the implemented version of trial and error is naïve as it is not given any prior experience and is unguided. The self-test probe does not learn where to test and does not change the underlying test patterns which hints at its limited applicability and lack of transfer ability. 
