@@ -1,4 +1,4 @@
-# self-tests
+# Recovering from learning stalls using selective self-tests
 
 ### Abstract
 A learner has stopped improving and needs to choose a recovery strategy, depending on the hidden reason for its stall. In this pilot, I evaluate under a fixed budget which way of choosing a recovery performs best when the stall has one of eight hidden causes. In this simulated three-joint arm setting, a self-probe based on the arm's kinematics only sometimes outperforms a solely history-based predictor. However, a selective self-test which predicts from its own history whether the test will improve its choice of recovery outperforms all other strategies. It successfully tested almost all of the stalls where the fix was in a configuration the learner never tried and almost none of the configurations where progress was being made otherwise. 
