@@ -51,7 +51,13 @@ This is the full description of an end-to-end online decision:
 #### Offline learners
 There are two random forest classifiers returning a recovery methodology, one from history features, one from history plus test features. They get trained on data from the synthetic stall generator mentioned above. Also, the selective self-test gate itself is a random forest regressor which learns utilising an out-of-fold estimates of the data above.
 
-### Findings
+### Experiments
+Each of the three goal sets contains 1,144 situations, with 143 per stall type, split into training (688), validation (232) and test (224). Once the design was fixed, the final models were fitted on training and validation data and scored once on the held-out test set. Each recovery was run five times, with its resulting command evaluated over 200 executions to estimate success rate. 
+
+Recovery utility is the gain in success rate minus the cost of attempts, including probes; spending the full 128-attempt budget costs 0.03. The reported percentages compare mean utility with the estimated best of the five recoveries for each situation: 85% therefore means 85% of that reference utility. 
+
+The 95% confidence intervals come from 2,000 bootstrap resamples of test situations and do not include variation from retraining the models.
+
 The selective self-test beats both never (history-only) and always testing. It achieved 83–86% of the best possible improvement, against 69–81% for choosing from history alone and 80–81% for always testing. 
 
 ![Recovery performance across strategies](src/self_tests/images/h2_main.png)
