@@ -1,6 +1,11 @@
 import argparse
 import os
 from enum import Enum
+from pathlib import Path
+
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import pandas as pd
@@ -210,9 +215,14 @@ def utility_table(out, lam=LAMBDA):
     return u
 
 
-def fit_predict(train, test, cols, labels_train, seed, proba=False):
+def fit_classifier(train, cols, labels_train, seed):
     clf = RandomForestClassifier(n_estimators=200, min_samples_leaf=2, random_state=seed, n_jobs=1)
     clf.fit(train[cols], labels_train)
+    return clf
+
+
+def fit_predict(train, test, cols, labels_train, seed, proba=False):
+    clf = fit_classifier(train, cols, labels_train, seed)
     pred = clf.predict(test[cols])
     return (pred, clf.predict_proba(test[cols]).max(1)) if proba else pred
 
@@ -279,7 +289,48 @@ def selective(train, test, cols_h, cols_p, U, best, seed):
     return fit_gate(train[cols_h], gain, seed).predict(test[cols_h]) > 0
 
 
-def score_split(df, u, train, test, seed, trial=None):
+CHOICE_POLICIES = ["choose probe", "choose probe or skip"]
+CHOICE_DIFFS = [("choose probe", "history"), ("choose probe", "history + off-target 0.1"),
+                ("choose probe or skip", "history"), ("choose probe or skip", "selective self-test")]
+
+
+def choose_probe(train, test, sets, U, best, seed, existing):
+    """Select among existing probes from history, optionally skipping the test."""
+    train = train.reset_index(drop=True)
+    probes = ("off-target 0.1", "broad", "repeat")
+    h = sets["hist r10"]
+    k = min(GATE_FOLDS, int(train.groupby("type").size().min()))
+    if k < 2:
+        raise ValueError("Probe selection needs at least two training goals per cause.")
+    fold = _folds(train, k, 10_000 + seed)
+    uh, up, prob = np.zeros(len(train)), np.zeros((len(train), 3)), np.zeros((len(train), len(RESPONSES)))
+
+    def probabilities(model, frame):
+        p = np.zeros((len(frame), len(RESPONSES)))
+        p[:, [RESPONSES.index(label) for label in model.classes_]] = model.predict_proba(frame[h])
+        return p
+
+    for f in range(k):
+        tr, te = train[fold != f], train[fold == f]
+        labels = [best(g, FULL - PROBE) for g in tr["goal_id"]]
+        ph = fit_predict(tr, te, h, [best(g, FULL) for g in tr["goal_id"]], seed)
+        uh[fold == f] = [U(g, FULL)[RESPONSES.index(p)] for g, p in zip(te["goal_id"], ph)]
+        prob[fold == f] = probabilities(fit_classifier(tr, h, labels, seed), te)
+        for j, name in enumerate(probes):
+            pp = fit_predict(tr, te, h + sets[name], labels, seed)
+            up[fold == f, j] = [U(g, FULL - PROBE)[RESPONSES.index(p)] for g, p in zip(te["goal_id"], pp)]
+    model = fit_gate(np.c_[train[h], prob], up - uh[:, None], seed)
+    classifier = fit_classifier(train, h, [best(g, FULL - PROBE) for g in train["goal_id"]], seed)
+    gain = model.predict(np.c_[test[h], probabilities(classifier, test)])
+    selected, test_now = gain.argmax(1), gain.max(1) > 0
+    values = np.column_stack([existing["history + " + p] for p in probes])
+    chosen = values[np.arange(len(test)), selected]
+    return {"choose probe": chosen.tolist(),
+            "choose probe or skip": np.where(test_now, chosen, existing["history"]).tolist(),
+            "_chosen_probe": np.array(probes)[selected].tolist(), "_probed_choice": test_now.tolist()}
+
+
+def score_split(df, u, train, test, seed, trial=None, probe_selection=False):
     U = lambda gid, b: u[gid][b]
     best = lambda gid, b: RESPONSES[int(np.argmax(U(gid, b)))]
     res = {}
@@ -329,6 +380,8 @@ def score_split(df, u, train, test, seed, trial=None):
     res["selective self-test"] = list(np.where(go, up, uh))
     res["selective (upper bound)"] = list(np.maximum(up, uh))
     res["_probed_sel"] = list(go)
+    if probe_selection:
+        res.update(choose_probe(train, test, sets, U, best, seed, res))
     return res
 
 
@@ -355,7 +408,7 @@ def report(df, u, results, ids_types, title):
     oracle = np.mean(results["oracle"])
     print(f"\n{title}")
     print(f"{'policy':22s} {'utility':>8s} {'share of oracle':>16s}")
-    for p in POLICIES:
+    for p in active_policies(results):
         v = np.mean(results[p])
         print(f"{NAMES.get(p, p):22s} {v:8.3f} {100 * v / oracle:15.0f}%")
 
@@ -402,15 +455,27 @@ def make_splits(dev, test, n):
     return pairs
 
 
-def pooled(df, u, trial, pairs):
-    res = {p: [] for p in POLICIES}
+def active_policies(results=None, probe_selection=False):
+    if probe_selection or (results is not None and "choose probe or skip" in results):
+        return POLICIES + CHOICE_POLICIES
+    return POLICIES
+
+
+def pooled(df, u, trial, pairs, probe_selection=False):
+    policies = active_policies(probe_selection=probe_selection)
+    res = {p: [] for p in policies}
     res.update(_best_fixed_name=[], _threshold=[], _probed=[], _pick_history=[], _pick_posture=[], _pick_off=[], _pick_off10=[],
                _probed_sel=[])
     types = []
+    if probe_selection:
+        res.update(_chosen_probe=[], _probed_choice=[])
     for r, (tr, te) in enumerate(pairs):
-        one = score_split(df, u, tr.reset_index(drop=True), te.reset_index(drop=True), r, trial)
-        for p in POLICIES:
+        one = score_split(df, u, tr.reset_index(drop=True), te.reset_index(drop=True), r, trial, probe_selection)
+        for p in policies:
             res[p] += list(one[p])
+        if probe_selection:
+            res['_chosen_probe'] += one['_chosen_probe']
+            res['_probed_choice'] += one['_probed_choice']
         res["_best_fixed_name"].append(one["_best_fixed_name"])
         res["_threshold"].append(one["_threshold"])
         res["_probed"] += one["_probed"]
@@ -470,8 +535,10 @@ def picks_summary(picks):
     return ", ".join(f"{vals[i]} {100 * counts[i] / len(picks):.0f}%" for i in order[:3])
 
 
-def run_checks(df, out, tr_outs, pairs, mode, show=None, pick_cols=None):
+def run_checks(df, out, tr_outs, pairs, mode, show=None, pick_cols=None, probe_selection=False):
     show = show or MAIN
+    if probe_selection:
+        show = list(show) + ["choose probe", "choose probe or skip"]
     pick_cols = pick_cols or [("history", "_pick_history"), ("history + self-test", "_pick_posture"),
                               ("off-target test", "_pick_off")]
     u = utility_table(out)
@@ -483,7 +550,7 @@ def run_checks(df, out, tr_outs, pairs, mode, show=None, pick_cols=None):
     print(f"{'training stalls per cause':28s}" + head())
     for n in CURVE:
         sub = [(subsample(tr, n, r), te) for r, (tr, te) in enumerate(pairs)]
-        res, _ = pooled(df, u, trial, sub)
+        res, _ = pooled(df, u, trial, sub, probe_selection)
         print(f"{('all' if n is None else str(n)):28s}" + "".join(f"{share(res, p):20.0f}%" for p in show))
 
     print(f"\n=== CHECK 2: a cause never seen in training ({mode}) ===")
@@ -494,7 +561,7 @@ def run_checks(df, out, tr_outs, pairs, mode, show=None, pick_cols=None):
     picks = {}
     for t in types:
         sub = [(tr[tr["type"] != t], te[te["type"] == t]) for tr, te in pairs]
-        res, _ = pooled(df, u, trial, sub)
+        res, _ = pooled(df, u, trial, sub, probe_selection)
         for p in show + ["oracle"]:
             tot[p] += list(res[p])
         picks[t] = [res[k] for _, k in pick_cols]
@@ -513,7 +580,7 @@ def run_checks(df, out, tr_outs, pairs, mode, show=None, pick_cols=None):
         lam = price / FULL
         u_l = utility_table(out, lam)
         trial_l = trial_utilities(tr_outs, lam)
-        res, _ = pooled(df, u_l, trial_l, pairs)
+        res, _ = pooled(df, u_l, trial_l, pairs, probe_selection)
         sh = {p: share(res, p) for p in show}
         win = max(sh, key=sh.get)
         print(f"{price:<28.2f}" + "".join(f"{sh[p]:20.0f}%" for p in show) + f"   {NAMES.get(win, win)}")
@@ -557,6 +624,10 @@ def verdict(point, lo, hi):
 
 
 def report_focus(df, res, ids_types, mode, optimistic):
+    focus, differences = list(FOCUS), list(FOCUS_DIFFS)
+    if "choose probe or skip" in res:
+        focus += CHOICE_POLICIES
+        differences += CHOICE_DIFFS
     nm = lambda p: FOCUS_NAMES.get(p, p)
     print("\n1. SANITY: no self-test attempt is AIMED closer than 0.10 to a reachable target")
     sanity = df.groupby("type").agg(
@@ -567,20 +638,20 @@ def report_focus(df, res, ids_types, mode, optimistic):
           "   boundary, so theirs is lower; they cannot succeed anyway). success = share of attempts that\n"
           "   still reached the target, through noise or a clipped joint; report it alongside the result.")
 
-    ci = intervals(res, FOCUS, FOCUS_DIFFS)
+    ci = intervals(res, focus, differences)
     note = "; re-splits overlap, so these are optimistic" if optimistic else ""
     print(f"\n2. MAIN RESULT ({mode})\n   share of the best possible utility, 95% interval (bootstrap over goals{note})")
     print(f"   {'best possible':24s} {np.mean(res['oracle']):.3f} utility = 100%")
-    for p in FOCUS:
+    for p in focus:
         print(f"   {nm(p):24s} {share(res, p):4.0f}%   [{ci[p][0]:.0f}%, {ci[p][1]:.0f}%]")
 
     print("\n3. DIFFERENCES (points of the best possible)")
     o = np.mean(res["oracle"])
-    for k, (a_, b_) in enumerate(FOCUS_DIFFS):
+    for k, (a_, b_) in enumerate(differences):
         pt = 100 * (np.mean(res[a_]) - np.mean(res[b_])) / o
         lo, hi = ci[(a_, b_)]
         line = f"   {nm(a_) + ' minus ' + nm(b_):48s} {pt:+5.1f}   [{lo:+.0f}, {hi:+.0f}]"
-        if k in VERDICT_ROWS:
+        if k in VERDICT_ROWS or k >= len(FOCUS_DIFFS):
             line += f"   -> {verdict(pt, lo, hi)}" if not optimistic else "   (verdict on --test runs only)"
         print(line)
     print("   Rule (for each comparison marked with a verdict): supported if positive with an interval\n"
@@ -589,7 +660,7 @@ def report_focus(df, res, ids_types, mode, optimistic):
           "   30 Sept 2026, 19:00 (seed 9 onwards); earlier sets are exploratory for these strategies.")
 
     print("\n4. WHERE IT COMES FROM: mean utility per stall cause (0 = abandon at once)")
-    show = ["oracle"] + FOCUS
+    show = ["oracle"] + focus
     print(f"   {'cause':15s}" + "".join(f"{('best possible' if p == 'oracle' else nm(p)):>24s}" for p in show))
     for t in dict.fromkeys(ids_types):
         m = np.array([x == t for x in ids_types])
@@ -601,7 +672,9 @@ def report_focus(df, res, ids_types, mode, optimistic):
         m = np.array([x == t for x in ids_types])
         print(f"   {t:15s} {100 * probed[m].mean():5.0f}%")
     print(f"   {'all stalls':15s} {100 * probed.mean():5.0f}%")
-
+    if '_probed_choice' in res:
+        print(f"\n6. PROBE CHOICE: tested {100 * np.mean(res['_probed_choice']):.1f}% of situations")
+        print("   proposed probe (before deciding whether to skip): " + picks_summary(res['_chosen_probe']))
 
 
 if __name__ == "__main__":
@@ -612,13 +685,16 @@ if __name__ == "__main__":
     ap.add_argument("--checks", action="store_true", help="add the three robustness checks (focused report)")
     ap.add_argument("--all", action="store_true", help="print every strategy and table (the full earlier output)")
     ap.add_argument("--no-checks", action="store_true", help="with --all: skip the three robustness checks")
+    ap.add_argument("--probe-selection", action="store_true", help="compare learned probe choice/skip with the existing baselines")
     a = ap.parse_args()
 
-    tag = a.goals.replace("goals_", "").replace(".json", "")
-    out = outcomes(a.goals, f"outcomes_{tag}.csv")
+    goals_file = Path(a.goals)
+    tag = goals_file.stem.replace("goals_", "")
+    cache = lambda prefix: str(goals_file.with_name(f"{prefix}_{tag}.csv"))
+    out = outcomes(a.goals, cache("outcomes"))
     u = utility_table(out)
-    tr_outs = {"trial and error": trial_outcomes(a.goals, f"trial_{tag}.csv"),
-               "trial and error (32)": trial_outcomes(a.goals, f"trial32_{tag}.csv", n=2 * SLICE)}
+    tr_outs = {"trial and error": trial_outcomes(a.goals, cache("trial")),
+               "trial and error (32)": trial_outcomes(a.goals, cache("trial32"), n=2 * SLICE)}
     trial = trial_utilities(tr_outs, LAMBDA)
     print("describing history and tests (same rule as generic.py) ...", flush=True)
     df = Q.build(a.goals, a.splits, 16)
@@ -626,7 +702,7 @@ if __name__ == "__main__":
     dev = df[df["split"].isin(["train", "val"])].reset_index(drop=True)
     test = df[df["split"] == "test"].reset_index(drop=True) if a.test else None
     mode = "FROZEN TEST SPLIT, fit on train+val, scored once" if a.test else f"train+val, {REPEATS} re-splits pooled"
-    res, types = pooled(df, u, trial, make_splits(dev, test, REPEATS))
+    res, types = pooled(df, u, trial, make_splits(dev, test, REPEATS), a.probe_selection)
 
     if not a.all:
         report_focus(df, res, types, mode, optimistic=not a.test)
@@ -635,7 +711,8 @@ if __name__ == "__main__":
             run_checks(df, out, tr_outs, make_splits(dev, test, EXTRA_SPLITS),
                        "test split" if a.test else f"train+val, {EXTRA_SPLITS} re-splits",
                        show=[p for p in FOCUS if p != "selective (upper bound)"],
-                       pick_cols=[("history", "_pick_history"), ("self-test (0.10)", "_pick_off10")])
+                       pick_cols=[("history", "_pick_history"), ("self-test (0.10)", "_pick_off10")],
+                       probe_selection=a.probe_selection)
         raise SystemExit
 
     print("\nwhat the 16 test attempts did, per goal type (mean over all goals)")
@@ -655,6 +732,8 @@ if __name__ == "__main__":
     print((pd.crosstab(df["type"], df["best"], normalize="index") * 100).round(0).to_string())
 
     report(df, u, res, types, mode)
+    if a.probe_selection:
+        report_focus(df, res, types, mode, optimistic=not a.test)
     ci = bootstrap(res)
     print("\n95% intervals (bootstrap over goals" + ("" if a.test else "; re-splits overlap, so these are optimistic") + ")")
     for p in MAIN:
@@ -667,4 +746,5 @@ if __name__ == "__main__":
 
     if not a.no_checks:
         pairs = make_splits(dev, test, EXTRA_SPLITS)
-        run_checks(df, out, tr_outs, pairs, "test split" if a.test else f"train+val, {EXTRA_SPLITS} re-splits")
+        run_checks(df, out, tr_outs, pairs, "test split" if a.test else f"train+val, {EXTRA_SPLITS} re-splits",
+                   probe_selection=a.probe_selection)
